@@ -1,0 +1,11 @@
+numpy
+scipy
+matplotlib
+folium
+pyyaml
+flask
+flask-socketio
+sounddevice
+librosa
+scikit-learn
+joblib

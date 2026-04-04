@@ -1,0 +1,125 @@
+# ========================================================================
+# SAR-TDoA Realistic Simulation (with ML) — Master Configuration
+# ========================================================================
+
+# ===== ENVIRONMENT =====
+environment:
+  speed_of_sound_ms: 343.0          # Speed of sound in m/s (20C)
+  ambient_noise_level: 5            # Background white/pink noise (0-100)
+  terrain: "flat"                   # flat, rubble, urban, forest_canyon
+  multipath:
+    enabled: true
+    max_reflections: 2
+    reflection_loss_min: 0.1          # 10% of direct amplitude
+    reflection_loss_max: 0.4          # 40% of direct amplitude
+    delay_min_ms: 2.0
+    delay_max_ms: 50.0
+
+# ===== AUDIO SYNTHESIS & PLAYBACK =====
+audio:
+  sample_rate: 16000                  # Hz (matches ESP32 I2S config)
+  bit_depth: 16                       # bits per sample
+  chunk_size: 1024                    # samples per processing chunk (64ms)
+  data_paths:
+    esc50_root: "data/esc50_raw/ESC-50-master"
+  speaker:
+    enabled: true                     # Play event sounds on PC speakers
+    volume: 0.8                       # 0.0 - 1.0
+    backend: "winsound"              # auto|sounddevice|winsound (winsound recommended on Windows)
+    fallback_beep: true               # Windows beep if audio backend/playback fails
+  stream:
+    enabled: true                     # Send continuous PCM stream to nodes
+    ambient_noise_types: ["wind"]     # wind | rain | machinery
+
+# ===== SENSOR NODES =====
+nodes:
+  positions:
+    1: {lat: 39.867000, lon: 32.733000}
+    2: {lat: 39.867000, lon: 32.734170}
+    3: {lat: 39.867898, lon: 32.734170}
+    4: {lat: 39.867898, lon: 32.733000}
+
+  stream_processor:
+    sta_window_ms: 50                 # Short-term average window
+    lta_window_ms: 5000               # Long-term average window
+    sta_lta_threshold: 2.5            # Trigger threshold
+    cooldown_ms: 2500                 # Min time between detections (prevent multi-peak mixing)
+
+  fft_prefilter:
+    enabled: true
+    whistle_freq_min: 2500
+    whistle_freq_max: 4000
+
+  ml_classifier:
+    enabled: true
+    model_type: "numpy_rescue"        # numpy_rescue | sklearn (use numpy_rescue for stable training)
+    confidence_threshold: 0.35
+    target_classes: ["whistle", "human_voice", "impact", "knocking"]
+    hybrid_rescue_enabled: true        # Use rule-based backup when ML is uncertain/rejecting noisy targets
+    whistle_rescue_enabled: true       # Rescue high-frequency survivor-like sounds misclassified as animal/ambient
+    whistle_rescue_min_peak: 280       # Minimum peak amplitude to apply whistle rescue
+
+  clock:
+    crystal_ppm_sigma: 10.0
+    gps_pps_jitter_ns: 100.0
+    gps_cold_start_sec: 5.0
+
+  battery:
+    initial_percent: 100
+    drain_rate_per_event: 0.1         # % per transmitted event
+
+# ===== LORA (E22-900T22D) =====
+lora:
+  module: "E22-900T22D"
+  frequency_mhz: 868.0
+  tx_power_dbm: 22
+  air_data_rate_bps: 9600            # 2400|4800|9600|19200|38400|62500
+  tx_packet_length: 64               # 32|64|128|240
+  payload_bytes: 23
+  base_reliability: 0.95
+  path_loss_exponent: 3.0            # 2.0=free-space, 3-4=urban/rubble
+  duty_cycle:
+    enabled: true
+    max_percent: 1.0
+  collision:
+    enabled: false
+    capture_threshold_db: 6.0
+
+# ===== SOLVER =====
+solver:
+  method: "auto_pipeline"            # chan_ho|auto_pipeline|lm|nelder_mead|ml_regressor
+  compare_all_methods: false         # If true, runs LM/Nelder-Mead comparison for each event (heavier)
+  rmse_threshold_m: 20.0
+  max_residual_m: 20.0               # Hard solver residual gate (meters)
+  anti_ghost:
+    enabled: true
+    distance_threshold_m: 150
+    min_magnitude: 45
+  bounds_padding_m: 15.0
+  max_range_m: 450
+  packet_timeout_sec: 1.5
+  grouping_window_ms: 220.0         # Group packets into same event only if timestamps are close (was hardcoded 500ms)
+  min_packets: 3
+  max_physical_slack_m: 20.0        # Reject physically inconsistent TDoA sets earlier
+  gdop_warning_threshold: 8.0
+  gdop_reject_threshold: 10.0
+  decision_score:
+    enabled: true
+    accept_threshold: 0.58
+    weights:
+      ml: 0.45
+      residual: 0.25
+      gdop: 0.20
+      packets: 0.10
+
+# ===== WEB UI =====
+web:
+  host: "127.0.0.1"
+  port: 8080
+  auto_open_browser: true
+  socketio_enabled: false          # Keep off on Windows if startup stalls at web import/init
+
+# ===== TESTING =====
+testing:
+  monte_carlo_iterations: 100
+  random_seed: null                  # null = random, int = deterministic

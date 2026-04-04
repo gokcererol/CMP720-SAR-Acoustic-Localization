@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAR-TDoA Realistic Simulation</title>
+    <meta name="description" content="Real-time acoustic TDoA localization simulation with ML sound classification">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <div class="header-left">
+                <div class="logo">
+                    <span class="logo-icon">📡</span>
+                    <h1>SAR-TDoA</h1>
+                    <span class="badge">Realistic Simulation</span>
+                </div>
+            </div>
+            <div class="header-center">
+                <div class="status-bar" id="system-status">
+                    <span class="status-dot running"></span>
+                    <span>System Active</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <span class="stat" id="stat-events">Events: <strong>0</strong></span>
+                <span class="stat" id="stat-packets">Packets: <strong>0</strong></span>
+                <span class="stat" id="stat-uptime">Uptime: <strong>0s</strong></span>
+            </div>
+        </header>
+
+        <!-- Main Layout -->
+        <div id="main-layout">
+            <!-- Left Sidebar: Controls -->
+            <aside id="sidebar-left">
+                <!-- Solver Method -->
+                <section class="panel" id="panel-solver">
+                    <h3>🧮 Solver Method</h3>
+                    <div class="radio-group">
+                        <label><input type="radio" name="solver" value="auto_pipeline" checked> Auto Pipeline</label>
+                        <label><input type="radio" name="solver" value="chan_ho"> Chan-Ho Only</label>
+                        <label><input type="radio" name="solver" value="lm"> Levenberg-Marquardt</label>
+                        <label><input type="radio" name="solver" value="nelder_mead"> Nelder-Mead</label>
+                        <label><input type="radio" name="solver" value="ml_regressor"> ML Regressor</label>
+                    </div>
+                    <button class="btn btn-secondary" id="btn-compare-all">📊 Compare All Methods</button>
+                </section>
+
+                <!-- Parameters -->
+                <section class="panel" id="panel-params">
+                    <h3>⚙️ Parameters</h3>
+                    <div class="slider-group">
+                        <label>RMSE Threshold (m)
+                            <input type="range" min="1" max="30" value="8.5" step="0.5" id="slider-rmse">
+                            <span class="slider-val" id="val-rmse">8.5</span>
+                        </label>
+                        <label>LoRa Reliability (%)
+                            <input type="range" min="0" max="100" value="95" step="1" id="slider-reliability">
+                            <span class="slider-val" id="val-reliability">95</span>
+                        </label>
+                        <label>ML Confidence Threshold
+                            <input type="range" min="0.1" max="1.0" value="0.7" step="0.05" id="slider-ml-conf">
+                            <span class="slider-val" id="val-ml-conf">0.70</span>
+                        </label>
+                        <label>STA/LTA Threshold
+                            <input type="range" min="1" max="15" value="5" step="0.5" id="slider-sta-lta">
+                            <span class="slider-val" id="val-sta-lta">5.0</span>
+                        </label>
+                        <label>Ambient Noise
+                            <input type="range" min="0" max="100" value="15" step="1" id="slider-noise">
+                            <span class="slider-val" id="val-noise">15</span>
+                        </label>
+                        <label>Speed of Sound (m/s)
+                            <input type="range" min="300" max="380" value="343" step="1" id="slider-sos">
+                            <span class="slider-val" id="val-sos">343</span>
+                        </label>
+                    </div>
+                </section>
+
+                <!-- Speaker -->
+                <section class="panel" id="panel-speaker">
+                    <h3>🔊 Audio Monitor</h3>
+                    <div class="speaker-controls">
+                        <button class="btn btn-icon" id="btn-mute">🔊</button>
+                        <input type="range" min="0" max="100" value="80" id="slider-volume">
+                        <span id="val-volume">80%</span>
+                    </div>
+                    <canvas id="waveform-canvas" width="260" height="60"></canvas>
+                    <div id="audio-info">
+                        <small id="audio-now-playing">Idle</small>
+                    </div>
+                    <div id="node-waveforms">
+                        <div class="node-wave"><span>N1</span><canvas class="node-canvas" data-node="1" width="180" height="20"></canvas></div>
+                        <div class="node-wave"><span>N2</span><canvas class="node-canvas" data-node="2" width="180" height="20"></canvas></div>
+                        <div class="node-wave"><span>N3</span><canvas class="node-canvas" data-node="3" width="180" height="20"></canvas></div>
+                        <div class="node-wave"><span>N4</span><canvas class="node-canvas" data-node="4" width="180" height="20"></canvas></div>
+                    </div>
+                </section>
+
+                <!-- Map Layers -->
+                <section class="panel" id="panel-layers">
+                    <h3>🗺️ Map Layers</h3>
+                    <div class="checkbox-group">
+                        <label><input type="checkbox" id="layer-nodes" checked> Sensor Nodes</label>
+                        <label><input type="checkbox" id="layer-events" checked> Events</label>
+                        <label><input type="checkbox" id="layer-hyperbolas"> Hyperbolas</label>
+                        <label><input type="checkbox" id="layer-confidence" checked> Confidence Ellipses</label>
+                        <label><input type="checkbox" id="layer-grid"> Range Grid</label>
+                    </div>
+                </section>
+            </aside>
+
+            <!-- Center: Map -->
+            <main id="map-container">
+                <div id="map"></div>
+            </main>
+
+            <!-- Right Sidebar: Events & Testing -->
+            <aside id="sidebar-right">
+                <!-- Test Runner -->
+                <section class="panel" id="panel-test">
+                    <h3>🧪 Test Runner</h3>
+                    <div class="test-controls">
+                        <select id="scenario-select">
+                            <option value="">Select scenario...</option>
+                        </select>
+                        <div class="btn-row">
+                            <button class="btn btn-primary" id="btn-fire-scenario">🔥 Fire</button>
+                            <button class="btn btn-secondary" id="btn-random">🎲 Random</button>
+                        </div>
+                        <div class="btn-row">
+                            <button class="btn btn-outline" id="btn-run-all">▶▶ Run All (32)</button>
+                        </div>
+                        <div class="btn-row category-btns">
+                            <button class="btn btn-xs" data-cat="A">A</button>
+                            <button class="btn btn-xs" data-cat="B">B</button>
+                            <button class="btn btn-xs" data-cat="C">C</button>
+                            <button class="btn btn-xs" data-cat="D">D</button>
+                            <button class="btn btn-xs" data-cat="E">E</button>
+                            <button class="btn btn-xs" data-cat="F">F</button>
+                            <button class="btn btn-xs" data-cat="G">G</button>
+                        </div>
+                    </div>
+                    <div id="test-results" class="results-bar">
+                        <span id="test-pass">✅ 0</span>
+                        <span id="test-fail">❌ 0</span>
+                    </div>
+                </section>
+
+                <!-- Manual Fire -->
+                <section class="panel" id="panel-manual">
+                    <h3>🎯 Manual Event</h3>
+                    <div class="form-group">
+                        <select id="manual-sound">
+                            <option value="whistle">Whistle</option>
+                            <option value="human_voice">Human Voice</option>
+                            <option value="impact">Impact</option>
+                            <option value="knocking">Knocking</option>
+                            <option value="collapse">Collapse</option>
+                            <option value="machinery">Machinery</option>
+                            <option value="motor">Motor</option>
+                            <option value="animal">Animal</option>
+                            <option value="wind">Wind</option>
+                            <option value="rain">Rain</option>
+                        </select>
+                        <label>Lat: <input type="number" step="0.000001" value="39.867449" id="manual-lat"></label>
+                        <label>Lon: <input type="number" step="0.000001" value="32.733585" id="manual-lon"></label>
+                        <label>Amp: <input type="range" min="0.1" max="1.0" value="0.8" step="0.05" id="manual-amp">
+                            <span id="val-manual-amp">0.8</span>
+                        </label>
+                        <button class="btn btn-primary" id="btn-fire-manual">🔥 Fire Event</button>
+                    </div>
+                </section>
+
+                <!-- Event History -->
+                <section class="panel" id="panel-events">
+                    <div class="panel-header-inline">
+                        <h3>📋 Event History <span class="badge" id="event-count-badge">0</span></h3>
+                        <button class="btn btn-xs btn-danger" id="btn-clear-events" title="Clear event cards and map overlays">🧹 Clear</button>
+                    </div>
+                    <div id="event-list" class="event-list">
+                        <p class="empty-state">No events yet. Fire a test scenario!</p>
+                    </div>
+                </section>
+
+                <!-- Node Status -->
+                <section class="panel" id="panel-node-status">
+                    <h3>🔋 Node Status</h3>
+                    <div id="node-status-grid" class="node-grid">
+                        <div class="node-card" data-node="1">
+                            <div class="node-header"><span class="node-id">N1</span><span class="node-gps">🛰️</span></div>
+                            <div class="node-battery"><div class="battery-fill" style="width:100%"></div></div>
+                            <div class="node-stats"><span class="node-events">0 events</span><span class="node-drift">0µs</span></div>
+                        </div>
+                        <div class="node-card" data-node="2">
+                            <div class="node-header"><span class="node-id">N2</span><span class="node-gps">🛰️</span></div>
+                            <div class="node-battery"><div class="battery-fill" style="width:100%"></div></div>
+                            <div class="node-stats"><span class="node-events">0 events</span><span class="node-drift">0µs</span></div>
+                        </div>
+                        <div class="node-card" data-node="3">
+                            <div class="node-header"><span class="node-id">N3</span><span class="node-gps">🛰️</span></div>
+                            <div class="node-battery"><div class="battery-fill" style="width:100%"></div></div>
+                            <div class="node-stats"><span class="node-events">0 events</span><span class="node-drift">0µs</span></div>
+                        </div>
+                        <div class="node-card" data-node="4">
+                            <div class="node-header"><span class="node-id">N4</span><span class="node-gps">🛰️</span></div>
+                            <div class="node-battery"><div class="battery-fill" style="width:100%"></div></div>
+                            <div class="node-stats"><span class="node-events">0 events</span><span class="node-drift">0µs</span></div>
+                        </div>
+                    </div>
+                </section>
+            </aside>
+        </div>
+    </div>
+
+    <!-- Event Detail Modal -->
+    <div id="event-modal" class="modal hidden">
+        <div class="modal-backdrop"></div>
+        <div class="modal-content">
+            <button class="modal-close" id="modal-close">✕</button>
+            <h2 id="modal-title">Event Detail</h2>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    {% if socketio_enabled %}
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    <script>
+        const socket = io();
+        socket.on('audio_event', (data) => {
+            if (typeof injectWaveform === 'function') {
+                injectWaveform(data.sound_type, data.amplitude);
+            }
+        });
+    </script>
+    {% endif %}
+    <script src="/static/js/map.js"></script>
+    <script src="/static/js/controls.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+    <script src="/static/js/audio.js"></script>
+</body>
+</html>
