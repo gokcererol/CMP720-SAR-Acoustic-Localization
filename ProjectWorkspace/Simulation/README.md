@@ -105,10 +105,12 @@ Most important sections:
 
 ## Real Dataset Requirement
 
-This project now expects real ESC-50 data for all non-whistle sounds.
+This project now expects real ESC-50 data for runtime playback.
 
-- `whistle` is procedural (ESC-50 has no true whistle class)
-- all other classes are loaded from ESC-50 recordings
+- non-whistle classes are loaded from ESC-50 recordings
+- `whistle` behavior is configurable via `audio.synthesis.whistle_mode` in `config.yaml`:
+  - `procedural`: generated whistle waveform (default in this repo)
+  - `surrogate`: real `chirping_birds` clips from ESC-50
 
 Dataset files are intended to be stored in Git via Git LFS.
 
@@ -116,7 +118,7 @@ Main tracked file:
 
 - `data/esc50.zip`
 
-At runtime, non-whistle playback auto-extracts this zip to `data/esc50_raw/` if needed.
+At runtime, dataset playback auto-extracts this zip to `data/esc50_raw/` if needed.
 
 After cloning:
 

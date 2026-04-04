@@ -60,9 +60,31 @@ async function loadScenarios() {
         if (runAllBtn) {
             runAllBtn.textContent = `▶▶ Run All (${scenarios.length})`;
         }
+
+        renderCategoryButtons(scenarios);
     } catch (e) {
         console.error('Failed to load scenarios:', e);
     }
+}
+
+function renderCategoryButtons(scenarios) {
+    const container = document.querySelector('.category-btns');
+    if (!container) return;
+
+    const categories = [...new Set(
+        (scenarios || [])
+            .map(s => String(s.category || '').trim())
+            .filter(Boolean)
+    )].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+    container.innerHTML = '';
+    categories.forEach(cat => {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-xs';
+        btn.dataset.cat = cat;
+        btn.textContent = cat;
+        container.appendChild(btn);
+    });
 }
 
 // ===== TEST BUTTONS =====
@@ -111,18 +133,19 @@ function bindTestButtons() {
           .catch(console.error);
     });
 
-    // Category buttons
-    document.querySelectorAll('.category-btns .btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const cat = btn.dataset.cat;
-            fetch('/api/scenarios/run_batch', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ category: cat, delay_sec: 2.5 }),
-            }).then(r => r.json())
-              .then(d => console.log(`▶▶ Category ${cat} started:`, d))
-              .catch(console.error);
-        });
+    // Category buttons (dynamic via loadScenarios)
+    document.querySelector('.category-btns')?.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('button[data-cat]');
+        if (!btn) return;
+
+        const cat = btn.dataset.cat;
+        fetch('/api/scenarios/run_batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ category: cat, delay_sec: 2.5 }),
+        }).then(r => r.json())
+          .then(d => console.log(`▶▶ Category ${cat} started:`, d))
+          .catch(console.error);
     });
 }
 

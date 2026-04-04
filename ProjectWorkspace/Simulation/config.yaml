@@ -27,6 +27,8 @@ audio:
     volume: 0.8                       # 0.0 - 1.0
     backend: "winsound"              # auto|sounddevice|winsound (winsound recommended on Windows)
     fallback_beep: true               # Windows beep if audio backend/playback fails
+  synthesis:
+    whistle_mode: "procedural"       # procedural | surrogate
   stream:
     enabled: true                     # Send continuous PCM stream to nodes
     ambient_noise_types: ["wind"]     # wind | rain | machinery

@@ -32,6 +32,9 @@ class SourceEngine:
         self.terrain = config.get("environment", {}).get("terrain", "flat")
         self.multipath_config = config.get("environment", {}).get("multipath", {})
         self.ambient_level = config.get("environment", {}).get("ambient_noise_level", 15)
+        self.whistle_mode = str(
+            config.get("audio", {}).get("synthesis", {}).get("whistle_mode", "surrogate")
+        ).strip().lower()
 
         # Node positions
         self.nodes = config.get("nodes", {}).get("positions", {})
@@ -87,8 +90,10 @@ class SourceEngine:
         3. Injected into each node's continuous audio stream
         """
         # 1. Synthesize the source waveform
+        sound_kwargs = dict(synth_kwargs)
+        sound_kwargs.setdefault("whistle_mode", self.whistle_mode)
         waveform = synthesize_sound(sound_type, duration=duration,
-                                    amplitude=amplitude, **synth_kwargs)
+                        amplitude=amplitude, **sound_kwargs)
 
         # 2. Play on speakers
         self.speaker.play(waveform)

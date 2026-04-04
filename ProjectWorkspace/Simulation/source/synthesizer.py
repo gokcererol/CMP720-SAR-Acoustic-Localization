@@ -1,14 +1,13 @@
 """
-Audio Synthesizer — Generates real PCM waveforms for all 11 sound classes.
-Each sound type is synthesized with realistic spectral characteristics
-matching what the ML classifier will encounter in the real system.
+Audio Synthesizer — Uses real ESC-50 recordings for playback.
+All classes are sourced from dataset audio (whistle uses a real surrogate class).
 """
 
 import os
 import random
 import zipfile
 import numpy as np
-from typing import Optional, Dict, List
+from typing import Dict, List, Optional
 
 # Heavy libraries are deferred to prevent startup hangs on some Windows systems
 _PD = None
@@ -45,8 +44,8 @@ SOUND_CLASSES = {
     "ambient": 10,
 }
 
-# Mapping from SAR categories back to ESC-50 folder names (Exact matches for esc50.csv)
-# NOTE: ESC-50 has no true human whistle class; runtime whistle is generated procedurally.
+# Mapping from SAR categories back to ESC-50 folder names (exact esc50.csv labels).
+# ESC-50 has no explicit human whistle class, so whistle uses real surrogate clips.
 SAR_TO_ESC = {
     "whistle": [],
     "human_voice": ["crying_baby", "sneezing", "laughing", "breathing", "coughing"],
@@ -60,6 +59,9 @@ SAR_TO_ESC = {
     "rain": ["rain"],
     "ambient": ["sea_waves", "water_drops", "insects"]
 }
+
+# Real surrogate clips used for whistle playback.
+WHISTLE_SURROGATE_ESC = ["chirping_birds"]
 
 class RealSoundLoader:
     """Loads and caches authentic recordings from the ESC-50 dataset."""
@@ -87,7 +89,7 @@ class RealSoundLoader:
 
         if not (os.path.exists(self.csv_path) and os.path.isdir(self.audio_dir)):
             raise RuntimeError(
-                "ESC-50 dataset is required for non-whistle sounds. "
+                "ESC-50 dataset is required for runtime playback. "
                 "Expected data at data/esc50_raw/ESC-50-master or data/esc50.zip"
             )
 
@@ -106,9 +108,14 @@ class RealSoundLoader:
             
         for _, row in df.iterrows():
             esc_cat = row['category']
+            fp = os.path.join(self.audio_dir, row['filename'])
+
+            # Add real surrogate clips to whistle pool.
+            if esc_cat in WHISTLE_SURROGATE_ESC and os.path.exists(fp):
+                self.samples["whistle"].append(fp)
+
             if esc_cat in esc_to_sar:
                 sar_cat = esc_to_sar[esc_cat]
-                fp = os.path.join(self.audio_dir, row['filename'])
                 if os.path.exists(fp):
                     self.samples[sar_cat].append(fp)
         
@@ -116,8 +123,8 @@ class RealSoundLoader:
         total = sum(len(v) for v in self.samples.values())
         print(f"✅ [SYNTH] Real-World Loader ready: {total} files mapped across {len(self.samples)} classes.")
 
-        # For non-whistle classes, require at least one mapped real sample.
-        required_real_classes = [c for c in SAR_TO_ESC.keys() if c != "whistle"]
+        # Require at least one real sample for every class.
+        required_real_classes = list(SAR_TO_ESC.keys())
         missing = [c for c in required_real_classes if len(self.samples.get(c, [])) == 0]
         if missing:
             raise RuntimeError(
@@ -188,13 +195,13 @@ loader = RealSoundLoader(DEFAULT_ESC50)
 
 def _procedural_whistle(duration: float = 0.8, amplitude: float = 0.8,
                         freq: Optional[float] = None) -> np.ndarray:
-    """Generate a human-like whistle waveform (not bird chirp proxy)."""
-    duration = float(max(0.2, min(2.0, duration)))
+    """Generate a whistle-like waveform for simulation mode."""
+    duration = float(max(0.2, min(2.5, duration if duration is not None else 0.8)))
     f0 = float(freq if freq is not None else random.uniform(2400.0, 3400.0))
 
     t = np.linspace(0.0, duration, int(SAMPLE_RATE * duration), endpoint=False)
 
-    # Subtle pitch modulation and slow drift make it sound human rather than synthetic.
+    # Human-like vibrato and mild drift to avoid pure-tone artifacts.
     vibrato_hz = random.uniform(4.0, 6.5)
     vibrato_depth = random.uniform(25.0, 60.0)
     drift = np.linspace(0.0, random.uniform(-80.0, 80.0), len(t))
@@ -202,11 +209,9 @@ def _procedural_whistle(duration: float = 0.8, amplitude: float = 0.8,
 
     phase = 2.0 * np.pi * np.cumsum(f_t) / SAMPLE_RATE
     base = np.sin(phase)
-    # Light harmonic content to avoid pure sine tone artifacts.
     harm2 = 0.18 * np.sin(2.0 * phase + 0.2)
     harm3 = 0.07 * np.sin(3.0 * phase + 1.1)
 
-    # Breath noise and smooth attack/release envelope.
     noise = 0.02 * np.random.normal(0.0, 1.0, len(t))
     attack = int(0.05 * len(t))
     release = int(0.10 * len(t))
@@ -226,21 +231,27 @@ def _procedural_whistle(duration: float = 0.8, amplitude: float = 0.8,
     y = np.clip(y * float(max(0.05, min(1.0, amplitude))) * 0.95, -1.0, 1.0)
     return (y * 32767).astype(np.int16)
 
-def synthesize_sound(sound_type: str, duration: Optional[float] = None,
+def synthesize_sound(sound_type: str, duration: float = None,
                       amplitude: float = 0.8, **kwargs) -> np.ndarray:
     """
-    Returns an authentic ESC-50 recording for the requested class.
-    Synthetization is deprecated and replaced by real-world data.
+    Return waveform for the requested class.
+    For whistle, behavior is controlled by whistle_mode:
+      - procedural: generated whistle waveform
+      - surrogate (default): real surrogate ESC-50 clips
+    All non-whistle classes are loaded from real-world dataset audio.
     """
-    # ESC-50 does not have true human whistle samples; whistle remains procedural.
-    if sound_type == "whistle":
+    whistle_mode = str(kwargs.get("whistle_mode", "surrogate")).strip().lower()
+    if sound_type == "whistle" and whistle_mode == "procedural":
         return _procedural_whistle(
             duration=duration if duration is not None else kwargs.get("duration", 0.8),
             amplitude=amplitude,
             freq=kwargs.get("freq", None),
         )
 
-    # All non-whistle sounds must come from real ESC-50 recordings.
+    # Duration and extra kwargs are accepted for API compatibility,
+    # but non-whistle playback source is always real dataset audio.
+    _ = duration
+    _ = kwargs
     return loader.get_sample(sound_type, amplitude=amplitude)
 
 CLASS_NAMES = {v: k for k, v in SOUND_CLASSES.items()}
