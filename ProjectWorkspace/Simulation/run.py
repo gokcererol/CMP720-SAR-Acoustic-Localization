@@ -191,27 +191,47 @@ def main():
     # Handle CLI scenarios
     if args.test:
         time.sleep(2.0)
-        from testing.scenarios import get_scenario
-        scenario = get_scenario(args.test)
-        print(f"\n🧪 Running scenario: {scenario['name']}")
-        source.fire_event(
-            scenario["sound_type"], scenario["lat"], scenario["lon"],
-            scenario["amplitude"], scenario_name=scenario["name"],
-            **scenario.get("synth_kwargs", {})
-        )
+        try:
+            from testing.scenarios import get_scenario
+        except Exception as e:
+            print(f"⚠️  Scenario support unavailable: {e}")
+            print("   Continue running without scenario execution.")
+            get_scenario = None
+
+        if get_scenario is None:
+            scenario = None
+        else:
+            scenario = get_scenario(args.test)
+
+        if scenario is None:
+            pass
+        else:
+            print(f"\n🧪 Running scenario: {scenario['name']}")
+            source.fire_event(
+                scenario["sound_type"], scenario["lat"], scenario["lon"],
+                scenario["amplitude"], scenario_name=scenario["name"],
+                **scenario.get("synth_kwargs", {})
+            )
 
     elif args.verify:
         time.sleep(2.0)
-        from testing.scenarios import ALL_SCENARIOS
-        print(f"\n🧪 Running all {len(ALL_SCENARIOS)} verification scenarios...")
-        for i, s in enumerate(ALL_SCENARIOS):
-            print(f"\n--- Scenario {i+1}/{len(ALL_SCENARIOS)}: {s['name']} ---")
-            source.fire_event(
-                s["sound_type"], s["lat"], s["lon"],
-                s["amplitude"], scenario_name=s["name"],
-                **s.get("synth_kwargs", {})
-            )
-            time.sleep(3.0)
+        try:
+            from testing.scenarios import ALL_SCENARIOS
+        except Exception as e:
+            print(f"⚠️  Scenario support unavailable: {e}")
+            print("   Continue running without verification batch.")
+            ALL_SCENARIOS = []
+
+        if ALL_SCENARIOS:
+            print(f"\n🧪 Running all {len(ALL_SCENARIOS)} verification scenarios...")
+            for i, s in enumerate(ALL_SCENARIOS):
+                print(f"\n--- Scenario {i+1}/{len(ALL_SCENARIOS)}: {s['name']} ---")
+                source.fire_event(
+                    s["sound_type"], s["lat"], s["lon"],
+                    s["amplitude"], scenario_name=s["name"],
+                    **s.get("synth_kwargs", {})
+                )
+                time.sleep(3.0)
 
     # Keep running until Ctrl+C
     def shutdown(sig, frame):

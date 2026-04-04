@@ -47,6 +47,7 @@ async function loadScenarios() {
         const resp = await fetch('/api/scenarios');
         const scenarios = await resp.json();
         const select = document.getElementById('scenario-select');
+        const runAllBtn = document.getElementById('btn-run-all');
         if (!select) return;
 
         scenarios.forEach(s => {
@@ -55,6 +56,10 @@ async function loadScenarios() {
             opt.textContent = `${s.name} [${s.expected_status}]`;
             select.appendChild(opt);
         });
+
+        if (runAllBtn) {
+            runAllBtn.textContent = `▶▶ Run All (${scenarios.length})`;
+        }
     } catch (e) {
         console.error('Failed to load scenarios:', e);
     }

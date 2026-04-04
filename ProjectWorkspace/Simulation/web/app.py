@@ -11,7 +11,21 @@ from typing import Dict, Optional
 
 from flask import Flask, render_template, jsonify, request
 
-from testing.scenarios import ALL_SCENARIOS, get_scenario, get_scenario_list, CATEGORIES
+SCENARIOS_AVAILABLE = True
+SCENARIO_IMPORT_ERROR = ""
+try:
+    from testing.scenarios import ALL_SCENARIOS, get_scenario, get_scenario_list, CATEGORIES
+except Exception as e:
+    SCENARIOS_AVAILABLE = False
+    SCENARIO_IMPORT_ERROR = str(e)
+    ALL_SCENARIOS = []
+    CATEGORIES = {}
+
+    def get_scenario(name: str):
+        raise ValueError("Scenario support unavailable: testing.scenarios module not found")
+
+    def get_scenario_list():
+        return []
 
 
 def create_app(source_engine=None, nodes=None, lora_channel=None,
@@ -36,6 +50,11 @@ def create_app(source_engine=None, nodes=None, lora_channel=None,
             socketio_enabled = False
 
     app.socketio_enabled = bool(socketio_enabled and socketio is not None)
+
+    if not SCENARIOS_AVAILABLE:
+        print(
+            f"⚠️ [WEB] Scenario APIs disabled: testing.scenarios is unavailable ({SCENARIO_IMPORT_ERROR})"
+        )
 
     # Store component references
     app.source_engine = source_engine
@@ -133,6 +152,12 @@ def create_app(source_engine=None, nodes=None, lora_channel=None,
     @app.route('/api/scenarios/fire', methods=['POST'])
     def api_fire_scenario():
         """Fire a specific test scenario."""
+        if not SCENARIOS_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "error": "Scenario support unavailable (missing testing.scenarios module)",
+            }), 503
+
         data = request.json
         scenario_name = data.get("name", "A1")
         try:
@@ -166,6 +191,12 @@ def create_app(source_engine=None, nodes=None, lora_channel=None,
     @app.route('/api/scenarios/run_batch', methods=['POST'])
     def api_run_batch():
         """Run a batch of scenarios."""
+        if not SCENARIOS_AVAILABLE:
+            return jsonify({
+                "success": False,
+                "error": "Scenario support unavailable (missing testing.scenarios module)",
+            }), 503
+
         data = request.json
         category = data.get("category", "all")
         delay = data.get("delay_sec", 3.0)
