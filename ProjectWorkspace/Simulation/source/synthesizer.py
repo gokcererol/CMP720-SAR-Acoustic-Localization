@@ -6,6 +6,7 @@ matching what the ML classifier will encounter in the real system.
 
 import os
 import random
+import zipfile
 import numpy as np
 from typing import Optional, Dict, List
 
@@ -69,11 +70,32 @@ class RealSoundLoader:
         self.samples: Dict[str, List[str]] = {cat: [] for cat in SAR_TO_ESC}
         self.cache: Dict[str, np.ndarray] = {}
         self._initialized = False
-    def _initialize(self):
-        if self._initialized: return
-        if not os.path.exists(self.csv_path):
-            print(f"⚠️ [SYNTH] ESC-50 Metadata not found at {self.csv_path}")
+
+    def _ensure_dataset_ready(self):
+        """Ensure ESC-50 raw files exist; extract from local zip if needed."""
+        if os.path.exists(self.csv_path) and os.path.isdir(self.audio_dir):
             return
+
+        zip_path = os.path.join(PROJECT_ROOT, "data", "esc50.zip")
+        extract_dir = os.path.join(PROJECT_ROOT, "data", "esc50_raw")
+
+        if os.path.exists(zip_path):
+            os.makedirs(extract_dir, exist_ok=True)
+            print("📦 [SYNTH] Extracting ESC-50 dataset from local zip...", flush=True)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(extract_dir)
+
+        if not (os.path.exists(self.csv_path) and os.path.isdir(self.audio_dir)):
+            raise RuntimeError(
+                "ESC-50 dataset is required for non-whistle sounds. "
+                "Expected data at data/esc50_raw/ESC-50-master or data/esc50.zip"
+            )
+
+    def _initialize(self):
+        if self._initialized:
+            return
+
+        self._ensure_dataset_ready()
             
         pd = _get_pandas()
         df = pd.read_csv(self.csv_path)
@@ -94,11 +116,19 @@ class RealSoundLoader:
         total = sum(len(v) for v in self.samples.values())
         print(f"✅ [SYNTH] Real-World Loader ready: {total} files mapped across {len(self.samples)} classes.")
 
+        # For non-whistle classes, require at least one mapped real sample.
+        required_real_classes = [c for c in SAR_TO_ESC.keys() if c != "whistle"]
+        missing = [c for c in required_real_classes if len(self.samples.get(c, [])) == 0]
+        if missing:
+            raise RuntimeError(
+                f"ESC-50 mapping incomplete for classes: {missing}. "
+                "Cannot continue without real dataset coverage."
+            )
+
     def get_sample(self, sound_type: str, amplitude: float = 0.8) -> np.ndarray:
         self._initialize()
         if sound_type not in self.samples or not self.samples[sound_type]:
-            print(f"⚠️ [SYNTH] No real-world samples for {sound_type}. Falling back to silence.")
-            return np.zeros(SAMPLE_RATE, dtype=np.int16)
+            raise RuntimeError(f"No real-world ESC-50 samples available for class: {sound_type}")
 
         file_path = random.choice(self.samples[sound_type])
         
@@ -146,19 +176,9 @@ class RealSoundLoader:
                 if len(self.cache) > 50: self.cache.clear()
                 self.cache[file_path] = waveform
             except Exception as e:
-                print(f"❌ [SYNTH] Error loading {file_path}: {e}")
-                return self._fallback_beep(amplitude)
+                raise RuntimeError(f"Failed loading real sample {file_path}: {e}") from e
         
         return waveform
-
-    def _fallback_beep(self, amplitude: float) -> np.ndarray:
-        """Generate a short synthetic chirp when a real sample cannot be loaded."""
-        dur = 0.6
-        t = np.linspace(0.0, dur, int(SAMPLE_RATE * dur), endpoint=False)
-        chirp = np.sin(2 * np.pi * (900 + 1800 * t) * t)
-        env = np.exp(-4.5 * t)
-        y = np.clip(chirp * env * max(0.15, min(1.0, amplitude)), -1.0, 1.0)
-        return (y * 32767).astype(np.int16)
 
 # Singleton loader pointing to the default data location
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -212,7 +232,7 @@ def synthesize_sound(sound_type: str, duration: Optional[float] = None,
     Returns an authentic ESC-50 recording for the requested class.
     Synthetization is deprecated and replaced by real-world data.
     """
-    # ESC-50 does not have true human whistle samples; use procedural whistle.
+    # ESC-50 does not have true human whistle samples; whistle remains procedural.
     if sound_type == "whistle":
         return _procedural_whistle(
             duration=duration if duration is not None else kwargs.get("duration", 0.8),
@@ -220,6 +240,7 @@ def synthesize_sound(sound_type: str, duration: Optional[float] = None,
             freq=kwargs.get("freq", None),
         )
 
+    # All non-whistle sounds must come from real ESC-50 recordings.
     return loader.get_sample(sound_type, amplitude=amplitude)
 
 CLASS_NAMES = {v: k for k, v in SOUND_CLASSES.items()}

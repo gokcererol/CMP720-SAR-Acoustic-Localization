@@ -103,11 +103,29 @@ Most important sections:
 - `solver`: method and quality thresholds
 - `web`: host/port
 
-## Data Setup (Optional)
+## Real Dataset Requirement
 
-Large dataset/cache files are not stored in Git.
+This project now expects real ESC-50 data for all non-whistle sounds.
 
-If you want full real-audio ingestion/training, run:
+- `whistle` is procedural (ESC-50 has no true whistle class)
+- all other classes are loaded from ESC-50 recordings
+
+Dataset files are intended to be stored in Git via Git LFS.
+
+Main tracked file:
+
+- `data/esc50.zip`
+
+At runtime, non-whistle playback auto-extracts this zip to `data/esc50_raw/` if needed.
+
+After cloning:
+
+```powershell
+git lfs install
+git lfs pull
+```
+
+If dataset files are missing locally, rebuild with:
 
 ```powershell
 python models/ingest_esc50.py
