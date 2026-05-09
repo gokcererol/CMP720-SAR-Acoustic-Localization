@@ -77,7 +77,7 @@ lora:
   tx_power_dbm: 22
   air_data_rate_bps: 9600            # 2400|4800|9600|19200|38400|62500
   tx_packet_length: 64               # 32|64|128|240
-  payload_bytes: 23
+  payload_bytes: 31
   base_reliability: 0.95
   path_loss_exponent: 3.0            # 2.0=free-space, 3-4=urban/rubble
   duty_cycle:
