@@ -24,9 +24,10 @@ constexpr size_t FFT_SIZE = 1024;
 constexpr size_t MFCC_FFT_SIZE = 512;
 constexpr uint32_t MAG_PRINT_PERIOD_MS = 100;
 constexpr uint32_t AUDIO_FLOW_PRINT_PERIOD_MS = 1000;
+constexpr uint32_t PERF_PRINT_PERIOD_MS = 1000;
 constexpr float TINYML_STD_EPS = 1e-6f;
 constexpr int TINYML_MEL_BANDS = 13;
-
+//todo
 // Simulation-aligned defaults
 constexpr float STA_WINDOW_MS = 50.0f;
 constexpr float LTA_WINDOW_MS = 5000.0f;
@@ -133,6 +134,23 @@ struct DetectionResult {
     size_t   onsetSampleOffset = 0;    // ← YENİ: chunk içindeki tetikleme sample indexi
     uint64_t onsetEpochMicros  = 0;    // ← YENİ: hesaplanan UTC onset zamanı
     int16_t  triggerRegion[CHUNK_SIZE] = {0};
+};
+
+struct PerfTimings {
+  uint32_t gpsUs = 0;
+  uint32_t captureUs = 0;
+  uint32_t convertUs = 0;
+  uint32_t metricsUs = 0;
+  uint32_t detectUs = 0;
+  uint32_t fftUs = 0;
+  uint32_t classifyUs = 0;
+  uint32_t rescueUs = 0;
+  uint32_t packetBuildUs = 0;
+  uint32_t txUs = 0;
+  uint32_t totalUs = 0;
+  bool detected = false;
+  bool txAttempted = false;
+  bool txOk = false;
 };
 
 struct FFTResult {
@@ -1514,6 +1532,29 @@ AudioMetrics computeAudioMetrics(const int16_t* samples, const size_t length) {
   return metrics;
 }
 
+void printPerfTimings(const PerfTimings& perf) {
+  static uint32_t lastPeriodicMs = 0;
+  const uint32_t nowMs = millis();
+
+  if (!perf.detected && (nowMs - lastPeriodicMs) < PERF_PRINT_PERIOD_MS) {
+    return;
+  }
+  if (!perf.detected) {
+    lastPeriodicMs = nowMs;
+  }
+
+  Serial.printf(
+      "PERF us gps=%lu capture=%lu convert=%lu metrics=%lu detect=%lu fft=%lu classify=%lu rescue=%lu pkt=%lu "
+      "tx=%lu total=%lu detected=%u tx_ok=%u\n",
+      static_cast<unsigned long>(perf.gpsUs), static_cast<unsigned long>(perf.captureUs),
+      static_cast<unsigned long>(perf.convertUs), static_cast<unsigned long>(perf.metricsUs),
+      static_cast<unsigned long>(perf.detectUs), static_cast<unsigned long>(perf.fftUs),
+      static_cast<unsigned long>(perf.classifyUs), static_cast<unsigned long>(perf.rescueUs),
+      static_cast<unsigned long>(perf.packetBuildUs), static_cast<unsigned long>(perf.txUs),
+      static_cast<unsigned long>(perf.totalUs), perf.detected ? 1U : 0U,
+      (perf.txAttempted && perf.txOk) ? 1U : 0U);
+}
+
 void printAudioMagnitude(const AudioMetrics& metrics) {
   const uint32_t now = millis();
   static uint32_t lastPrintMs = 0;
@@ -1844,58 +1885,100 @@ void nodeSetup() {
 }
 
 void nodeLoop() {
-    updateGps();
+  const int64_t loopStartUs = esp_timer_get_time();
+  PerfTimings perf{};
 
-    // I2S okumadan ÖNCE zamanı kaydet — bu chunk'un ilk sample'ının zamanı
-    const uint64_t chunkStartEpoch = currentGpsEpochMicros();   // ← YENİ
+  int64_t stageStartUs = esp_timer_get_time();
+  updateGps();
+  perf.gpsUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
 
-    size_t bytesRead = 0;
-    const esp_err_t readErr = i2s_read(I2S_PORT, gAudioRawChunk,
-                                       sizeof(gAudioRawChunk),
-                                       &bytesRead, portMAX_DELAY);
-    if (readErr != ESP_OK) return;
+  // i2s_read'den ÖNCE chunk zamanını kaydet
+  const uint64_t chunkStartEpoch = currentGpsEpochMicros();
 
-    const size_t rawSamplesRead = bytesRead / sizeof(int32_t);
-    size_t samplesRead = 0;
-    convertRawI2S32ToPcm16(gAudioRawChunk, rawSamplesRead, gAudioChunk, samplesRead);
-    if (samplesRead == 0) return;
+  size_t bytesRead = 0;
+  stageStartUs = esp_timer_get_time();
+  const esp_err_t readErr = i2s_read(I2S_PORT, gAudioRawChunk, sizeof(gAudioRawChunk), &bytesRead, portMAX_DELAY);
+  perf.captureUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+  if (readErr != ESP_OK) {
+    perf.totalUs = static_cast<uint32_t>(esp_timer_get_time() - loopStartUs);
+    printPerfTimings(perf);
+    return;
+  }
 
-    const AudioMetrics metrics = computeAudioMetrics(gAudioChunk, samplesRead);
-    printAudioMagnitude(metrics);
-    updateAudioFlow(metrics);
+  const size_t rawSamplesRead = bytesRead / sizeof(int32_t);
+  size_t samplesRead = 0;
+  stageStartUs = esp_timer_get_time();
+  convertRawI2S32ToPcm16(gAudioRawChunk, rawSamplesRead, gAudioChunk, samplesRead);
+  perf.convertUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+  if (samplesRead == 0) {
+    perf.totalUs = static_cast<uint32_t>(esp_timer_get_time() - loopStartUs);
+    printPerfTimings(perf);
+    return;
+  }
 
-    DetectionResult detection{};
-    // chunkStartEpoch parametresi eklendi
-    if (!processChunkForDetection(gAudioChunk, samplesRead,
-                                  chunkStartEpoch, detection)) {
-        return;
-    }
+  stageStartUs = esp_timer_get_time();
+  const AudioMetrics metrics = computeAudioMetrics(gAudioChunk, samplesRead);
+  printAudioMagnitude(metrics);
+  updateAudioFlow(metrics);
+  perf.metricsUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
 
+  DetectionResult detection{};
+  stageStartUs = esp_timer_get_time();
+  // ← senin eklemen: chunkStartEpoch parametresi
+  if (!processChunkForDetection(gAudioChunk, samplesRead, chunkStartEpoch, detection)) {
+    perf.detectUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+    perf.totalUs = static_cast<uint32_t>(esp_timer_get_time() - loopStartUs);
+    printPerfTimings(perf);
+    return;
+  }
+  perf.detected = true;
+  perf.detectUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+
+  // geri kalan her şey takım arkadaşının kodu, değişmez
+  stageStartUs = esp_timer_get_time();
   const FFTResult fftResult = analyzeFFT(detection.triggerRegion, detection.triggerLen);
+  perf.fftUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+
+  stageStartUs = esp_timer_get_time();
   ClassResult cls = classifyWithTinyMl(detection);
+  perf.classifyUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+
+  stageStartUs = esp_timer_get_time();
   applyWhistleRescue(detection, fftResult, cls);
+  perf.rescueUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
 
   if (cls.action == PacketAction::Target && cls.isTarget) {
+    stageStartUs = esp_timer_get_time();
     const NodePacket packet = buildPacket(detection, fftResult, cls);
+    perf.packetBuildUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+
+    stageStartUs = esp_timer_get_time();
     const bool txOk = transmitPacket(packet);
+    perf.txUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
+    perf.txAttempted = true;
+    perf.txOk = txOk;
+
     if (txOk) {
       printPacketDump(packet);
       gBatteryPct = fmaxf(0.0f, gBatteryPct - BATTERY_DRAIN_PER_EVENT);
-      Serial.printf("TX evt=%u class=%s conf=%u%% peak=%u f0=%uHz snr=%u\n", static_cast<unsigned>(packet.event_count),
-                    className(packet.ml_class), static_cast<unsigned>(packet.ml_confidence),
-                    static_cast<unsigned>(packet.magnitude), static_cast<unsigned>(packet.peak_freq_hz),
-                    static_cast<unsigned>(packet.snr_db));
+      Serial.printf("TX evt=%u class=%s conf=%u%% peak=%u f0=%uHz snr=%u\n",
+                    static_cast<unsigned>(packet.event_count), className(packet.ml_class),
+                    static_cast<unsigned>(packet.ml_confidence), static_cast<unsigned>(packet.magnitude),
+                    static_cast<unsigned>(packet.peak_freq_hz), static_cast<unsigned>(packet.snr_db));
     } else {
       Serial.println("LoRa TX failed (AUX timeout or UART short write)");
     }
   } else if (cls.action == PacketAction::LogOnly) {
-    Serial.printf("LOG class=%s conf=%u%% peak=%u\n", className(cls.classId), static_cast<unsigned>(cls.confidencePct),
-                  static_cast<unsigned>(detection.peakAmplitude));
+    Serial.printf("LOG class=%s conf=%u%% peak=%u\n", className(cls.classId),
+                  static_cast<unsigned>(cls.confidencePct), static_cast<unsigned>(detection.peakAmplitude));
   } else {
     Serial.printf("REJECT class=%s conf=%u%% peak=%u fft_pass=%d\n", className(cls.classId),
                   static_cast<unsigned>(cls.confidencePct), static_cast<unsigned>(detection.peakAmplitude),
                   fftResult.passed ? 1 : 0);
   }
+
+  perf.totalUs = static_cast<uint32_t>(esp_timer_get_time() - loopStartUs);
+  printPerfTimings(perf);
 }
 
 }  // namespace
