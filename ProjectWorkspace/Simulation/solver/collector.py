@@ -1,5 +1,5 @@
 """
-Packet Collector — Receives 23-byte LoRa packets from the channel simulator,
+Packet Collector — Receives LoRa packets from the channel simulator,
 groups them by event using timestamp proximity, and assembles event records.
 """
 
@@ -81,9 +81,6 @@ class PacketCollector:
                 self._check_timeouts()
                 continue
             except Exception:
-                continue
-
-            if len(data) != 23:
                 continue
 
             packet = unpack_packet(data)

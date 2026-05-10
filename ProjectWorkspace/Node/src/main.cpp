@@ -186,6 +186,23 @@ struct AudioFlowState {
   uint32_t lastFingerprint = 0;
 };
 
+struct PerfTimings {
+  uint32_t gpsUs = 0;
+  uint32_t captureUs = 0;
+  uint32_t convertUs = 0;
+  uint32_t metricsUs = 0;
+  uint32_t detectUs = 0;
+  uint32_t fftUs = 0;
+  uint32_t classifyUs = 0;
+  uint32_t rescueUs = 0;
+  uint32_t packetBuildUs = 0;
+  uint32_t txUs = 0;
+  uint32_t totalUs = 0;
+  bool detected = false;
+  bool txAttempted = false;
+  bool txOk = false;
+};
+
 struct GpsState {
   bool rawUartEnabled = false;
   bool haveFix = false;

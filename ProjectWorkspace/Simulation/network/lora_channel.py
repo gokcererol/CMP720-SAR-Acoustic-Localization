@@ -29,7 +29,7 @@ class LoRaChannel:
         self.solver_port = 5000
         self.tx_power_dbm = lora_cfg.get("tx_power_dbm", 22)
         self.air_data_rate = lora_cfg.get("air_data_rate_bps", 9600)
-        self.payload_bytes = lora_cfg.get("payload_bytes", 23)
+        self.payload_bytes = lora_cfg.get("payload_bytes", 31)
         self.base_reliability = lora_cfg.get("base_reliability", 0.95)
         self.path_loss_exp = lora_cfg.get("path_loss_exponent", 3.0)
 
@@ -148,8 +148,9 @@ class LoRaChannel:
             struct.pack_into("<Q", data, 1, max(0, new_ts))
             # Recompute CRC
             from node.lora_tx import crc8
-            new_crc = crc8(bytes(data[:21]))
-            data[21] = new_crc
+            crc_index = len(data) - 2
+            new_crc = crc8(bytes(data[:crc_index]))
+            data[crc_index] = new_crc
             return bytes(data)
 
         return packet_data
@@ -167,7 +168,7 @@ class LoRaChannel:
             except Exception:
                 continue
 
-            if len(data) != 23:
+            if len(data) != self.payload_bytes:
                 continue
 
             # Apply channel effects

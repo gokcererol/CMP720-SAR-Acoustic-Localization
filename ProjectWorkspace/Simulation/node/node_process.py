@@ -1,7 +1,7 @@
 """
 Node Process — Main ESP32 node emulation loop.
 Receives continuous PCM audio stream, processes through STA/LTA → FFT → ML pipeline,
-and transmits 23-byte LoRa packets when target sounds are detected.
+and transmits 31-byte LoRa packets when target sounds are detected.
 """
 
 import socket
@@ -36,6 +36,10 @@ class NodeProcess:
 
         audio_cfg = config.get("audio", {})
         node_cfg = config.get("nodes", {})
+        positions = node_cfg.get("positions", {})
+        node_pos = positions.get(node_id) or positions.get(str(node_id), {})
+        self.base_lat = float(node_pos.get("lat", 39.867000))
+        self.base_lon = float(node_pos.get("lon", 32.733000))
 
         # Stream processor
         sp_cfg = node_cfg.get("stream_processor", {})
@@ -157,6 +161,9 @@ class NodeProcess:
         if ml_result["action"] == "target" and ml_result["is_target"]:
             # Get drifted timestamp
             ts_micros = self.clock.get_timestamp_micros(time.time())
+            now_t = time.time()
+            gps_lat = self.base_lat + 0.00002 * np.sin(now_t * 0.07 + self.node_id)
+            gps_lon = self.base_lon + 0.00002 * np.cos(now_t * 0.05 + self.node_id)
 
             # Build and transmit packet
             success = self.lora_tx.send_event(
@@ -166,6 +173,8 @@ class NodeProcess:
                 ml_class=ml_result["class_id"],
                 ml_confidence=int(ml_result["confidence"] * 100),
                 snr_db=detection.get("snr_db", 0),
+                gps_lat=gps_lat,
+                gps_lon=gps_lon,
             )
 
             if success:

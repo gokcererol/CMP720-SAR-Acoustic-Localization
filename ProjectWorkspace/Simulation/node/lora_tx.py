@@ -1,5 +1,5 @@
 """
-LoRa TX — Builds and transmits 23-byte binary packets.
+LoRa TX — Builds and transmits 31-byte binary packets.
 Simulates the ESP32 side of LoRa packet construction.
 """
 
@@ -31,13 +31,13 @@ def crc8(data: bytes) -> int:
 
 class LoRaTX:
     """
-    Constructs and transmits 23-byte TDoA binary packets.
+    Constructs and transmits 31-byte TDoA binary packets.
     Packet format matches the C struct in ESP32 firmware.
     """
 
-    # struct format: <BQHHBBBBbBHBB = 23 bytes
-    PACKET_FORMAT = "<BQHHBBBBbBHBB"
-    PACKET_SIZE = 23
+    # struct format: <BQHHBBBBbBiiHBB = 31 bytes
+    PACKET_FORMAT = "<BQHHBBBBbBiiHBB"
+    PACKET_SIZE = 31
 
     def __init__(self, node_id: int, lora_channel_port: int = 5020,
                  battery_pct: int = 100):
@@ -52,16 +52,22 @@ class LoRaTX:
 
     def build_packet(self, ts_micros: int, magnitude: int, peak_freq_hz: int,
                      ml_class: int, ml_confidence: int, snr_db: int,
-                     gps_hdop: int = 15) -> bytes:
+                     gps_hdop: int = 15, gps_lat: float = 39.867000,
+                     gps_lon: float = 32.733000) -> bytes:
         """
-        Build a 23-byte binary packet.
+        Build a 31-byte binary packet.
         Returns the raw bytes ready for transmission.
         """
         self.event_count += 1
+        lat_e7 = int(round(float(gps_lat) * 10_000_000.0))
+        lon_e7 = int(round(float(gps_lon) * 10_000_000.0))
+
+        lat_e7 = max(-(2**31), min((2**31) - 1, lat_e7))
+        lon_e7 = max(-(2**31), min((2**31) - 1, lon_e7))
 
         # Pack all fields except CRC and reserved
         data_without_crc = struct.pack(
-            "<BQHHBBBBbBH",
+            "<BQHHBBBBbBiiH",
             int(self.node_id),           # uint8  (1B)
             int(ts_micros),              # uint64 (8B)
             int(min(magnitude, 65535)),  # uint16 (2B)
@@ -72,6 +78,8 @@ class LoRaTX:
             int(min(self.battery_pct, 100)),  # uint8  (1B)
             int(max(-128, min(127, self.temperature_c))),  # int8 (1B)
             int(min(gps_hdop, 255)),     # uint8  (1B)
+            int(lat_e7),                 # int32 (4B)
+            int(lon_e7),                 # int32 (4B)
             int(self.event_count & 0xFFFF),  # uint16 (2B)
         )
 
@@ -94,18 +102,21 @@ class LoRaTX:
             return False
 
     def send_event(self, ts_micros: int, magnitude: int, peak_freq_hz: int,
-                   ml_class: int, ml_confidence: int, snr_db: int) -> bool:
+                   ml_class: int, ml_confidence: int, snr_db: int,
+                   gps_lat: float = 39.867000, gps_lon: float = 32.733000) -> bool:
         """Build and transmit a TDoA event packet."""
         packet = self.build_packet(
             ts_micros, magnitude, peak_freq_hz,
-            ml_class, ml_confidence, snr_db
+            ml_class, ml_confidence, snr_db,
+            gps_lat=gps_lat, gps_lon=gps_lon,
         )
         success = self.transmit(packet)
 
         if success:
-            print(f"🚀 [Node {self.node_id}] 23-Byte packet TX | "
+            print(f"🚀 [Node {self.node_id}] 31-Byte packet TX | "
                   f"TS: {ts_micros} | Mag: {magnitude} | "
-                  f"Class: {ml_class} ({ml_confidence}%) | SNR: {snr_db}dB")
+                  f"Class: {ml_class} ({ml_confidence}%) | SNR: {snr_db}dB | "
+                  f"Lat/Lon: {gps_lat:.6f},{gps_lon:.6f}")
         return success
 
     def drain_battery(self, amount: float = 0.1):
@@ -119,14 +130,14 @@ class LoRaTX:
 
 def unpack_packet(data: bytes) -> Optional[Dict]:
     """
-    Unpack a received 23-byte packet.
+    Unpack a received 31-byte packet.
     Returns None if invalid.
     """
-    if len(data) != 23:
+    if len(data) != 31:
         return None
 
     try:
-        fields = struct.unpack("<BQHHBBBBbBHBB", data)
+        fields = struct.unpack("<BQHHBBBBbBiiHBB", data)
         packet = {
             "node_id": fields[0],
             "ts_micros": fields[1],
@@ -138,13 +149,17 @@ def unpack_packet(data: bytes) -> Optional[Dict]:
             "battery_pct": fields[7],
             "temperature_c": fields[8],
             "gps_hdop": fields[9],
-            "event_count": fields[10],
-            "crc8": fields[11],
-            "reserved": fields[12],
+            "latitude_e7": fields[10],
+            "longitude_e7": fields[11],
+            "latitude": fields[10] / 10_000_000.0,
+            "longitude": fields[11] / 10_000_000.0,
+            "event_count": fields[12],
+            "crc8": fields[13],
+            "reserved": fields[14],
         }
 
         # Verify CRC
-        data_without_crc = data[:21]
+        data_without_crc = data[:29]
         expected_crc = crc8(data_without_crc)
         if packet["crc8"] != expected_crc:
             return None  # CRC failure
