@@ -10,7 +10,7 @@
 #include "tinyml_model_params.h"
 
 #ifndef NODE_ID
-#define NODE_ID 1
+#define NODE_ID 1 
 #endif
 
 static_assert(NODE_ID >= 1 && NODE_ID <= 255, "NODE_ID must be in [1,255]");
@@ -27,7 +27,7 @@ constexpr uint32_t AUDIO_FLOW_PRINT_PERIOD_MS = 1000;
 constexpr uint32_t PERF_PRINT_PERIOD_MS = 1000;
 constexpr float TINYML_STD_EPS = 1e-6f;
 constexpr int TINYML_MEL_BANDS = 13;
-
+//todo
 // Simulation-aligned defaults
 constexpr float STA_WINDOW_MS = 50.0f;
 constexpr float LTA_WINDOW_MS = 5000.0f;
@@ -89,15 +89,19 @@ constexpr int8_t DEFAULT_TEMP_C = 22;
 constexpr uint8_t DEFAULT_GPS_HDOP = 15;
 
 #ifndef PIN_GPS_TX
-#define PIN_GPS_TX -1
+#define PIN_GPS_TX 17
 #endif
 
 #ifndef PIN_GPS_RX
-#define PIN_GPS_RX -1
+#define PIN_GPS_RX 18
+#endif
+
+#ifndef PIN_GPS_PPS
+#define PIN_GPS_PPS 7   // -1 = PPS devre dışı, gerçek donanımda örn. 7
 #endif
 
 constexpr uint32_t GPS_UART_BAUD = 9600;
-constexpr bool GPS_MOCK_ENABLED = true;
+constexpr bool GPS_MOCK_ENABLED = false;
 constexpr uint32_t GPS_MOCK_PERIOD_MS = 1000;
 constexpr uint32_t GPS_RAW_TIMEOUT_MS = 4000;
 constexpr double GPS_MOCK_BASE_LAT = 39.867000;
@@ -117,17 +121,36 @@ constexpr uint8_t CLASS_RAIN = 9;
 constexpr uint8_t CLASS_AMBIENT = 10;
 
 enum class PacketAction : uint8_t {
-  Target,
+  Target, 
   LogOnly,
   Reject,
 };
 
 struct DetectionResult {
+    bool     detected        = false;
+    uint16_t peakAmplitude   = 0;
+    uint8_t  snrDb           = 0;
+    size_t   triggerLen      = 0;
+    size_t   onsetSampleOffset = 0;    // ← YENİ: chunk içindeki tetikleme sample indexi
+    uint64_t onsetEpochMicros  = 0;    // ← YENİ: hesaplanan UTC onset zamanı
+    int16_t  triggerRegion[CHUNK_SIZE] = {0};
+};
+
+struct PerfTimings {
+  uint32_t gpsUs = 0;
+  uint32_t captureUs = 0;
+  uint32_t convertUs = 0;
+  uint32_t metricsUs = 0;
+  uint32_t detectUs = 0;
+  uint32_t fftUs = 0;
+  uint32_t classifyUs = 0;
+  uint32_t rescueUs = 0;
+  uint32_t packetBuildUs = 0;
+  uint32_t txUs = 0;
+  uint32_t totalUs = 0;
   bool detected = false;
-  uint16_t peakAmplitude = 0;
-  uint8_t snrDb = 0;
-  size_t triggerLen = 0;
-  int16_t triggerRegion[CHUNK_SIZE] = {0};
+  bool txAttempted = false;
+  bool txOk = false;
 };
 
 struct FFTResult {
@@ -206,6 +229,15 @@ struct GpsState {
   size_t lineLength = 0;
 };
 
+struct PpsState {
+    volatile bool         fresh       = false;   // ISR'dan loop'a sinyal
+    volatile int64_t      ppsMono     = 0;        // PPS anındaki esp_timer değeri (µs)
+    volatile uint64_t     ppsEpoch    = 0;        // PPS anındaki UTC epoch (µs)
+    int64_t               lastMono    = 0;        // son kullanılan PPS mono
+    uint64_t              lastEpoch   = 0;        // son kullanılan PPS epoch
+    bool                  locked      = false;    // en az bir PPS+GPS eşleşmesi oldu mu
+};
+
 #pragma pack(push, 1)
 struct NodePacket {
   uint8_t node_id;
@@ -252,6 +284,7 @@ uint32_t gSamplesSinceTrigger = COOLDOWN_SAMPLES;
 uint16_t gEventCount = 0;
 float gBatteryPct = 100.0f;
 GpsState gGps{};
+static PpsState gPps{};
 AudioFlowState gAudioFlow{};
 
 void fftInPlace(float* real, float* imag, const size_t n);
@@ -405,6 +438,7 @@ void computeSegmentMfcc13(const int16_t* segment, const size_t len, float outMfc
   }
 }
 
+// Root mean square (RMS) amplitude of the signal, normalized to [0,1] by dividing by 32768.0f.
 float computeRms(const int16_t* samples, const size_t length) {
   if (length == 0) {
     return 0.0f;
@@ -417,6 +451,7 @@ float computeRms(const int16_t* samples, const size_t length) {
   return sqrtf(static_cast<float>(sumSquares / static_cast<double>(length)));
 }
 
+// Zero-crossing rate: the rate at which the signal changes sign. 
 float computeZcr(const int16_t* samples, const size_t length) {
   if (length < 2) {
     return 0.0f;
@@ -616,6 +651,7 @@ void printInitStep(const char* step, const char* message) {
   Serial.printf("[INIT] %-12s %s\n", step, message);
 }
 
+//hex to decimal conversion for checksum validation
 int hexNibble(const char c) {
   if (c >= '0' && c <= '9') {
     return c - '0';
@@ -797,13 +833,18 @@ void updateGpsEpochAnchor(const bool fromRaw) {
 }
 
 uint64_t currentGpsEpochMicros() {
-  if (gGps.haveEpochAnchor) {
-    const int64_t nowUs = static_cast<int64_t>(esp_timer_get_time());
-    const int64_t delta = nowUs - gGps.monoAnchorMicros;
-    const int64_t clampedDelta = (delta > 0) ? delta : 0;
-    return gGps.epochAnchorMicros + static_cast<uint64_t>(clampedDelta);
-  }
-
+   if (gPps.locked) {
+        // PPS'e göre interpolasyon — en hassas yol
+        const int64_t  nowMono  = esp_timer_get_time();
+        const int64_t  delta    = nowMono - gPps.lastMono;
+        return gPps.lastEpoch + static_cast<uint64_t>(delta > 0 ? delta : 0);
+    }
+    if (gGps.haveEpochAnchor) {
+        const int64_t nowUs    = esp_timer_get_time();
+        const int64_t delta    = nowUs - gGps.monoAnchorMicros;
+        return gGps.epochAnchorMicros + static_cast<uint64_t>(delta > 0 ? delta : 0);
+    }
+    
   // Fallback to mock GPS epoch baseline until first UTC+date lock.
   return GPS_MOCK_BASE_EPOCH_SEC * 1000000ULL + static_cast<uint64_t>(millis()) * 1000ULL;
 }
@@ -1069,6 +1110,26 @@ void pushMockGpsSentence() {
 
 void updateGps() {
   pollRawGpsSignal();
+  if (gPps.fresh && gGps.haveEpochAnchor) {
+        noInterrupts();
+        const int64_t  pulseMono = gPps.ppsMono;
+        gPps.fresh               = false;
+        interrupts();
+
+        // PPS anı = UTC'nin tam saniye sınırı
+        // GPS anchor'dan o ana kadar geçen süreyi hesapla,
+        // ardından en yakın tam saniyeye yuvarla
+        const int64_t  deltaMono   = pulseMono - gGps.monoAnchorMicros;
+        const uint64_t rawEpoch    = gGps.epochAnchorMicros
+                                     + static_cast<uint64_t>(deltaMono > 0 ? deltaMono : 0);
+        // En yakın tam saniyeye snap
+        const uint64_t epochSec    = (rawEpoch + 500000ULL) / 1000000ULL;
+        const uint64_t snappedEpoch = epochSec * 1000000ULL;
+
+        gPps.lastMono  = pulseMono;
+        gPps.lastEpoch = snappedEpoch;
+        gPps.locked    = true;
+  }  
 
   const uint32_t now = millis();
   const bool rawFixFresh =
@@ -1112,6 +1173,17 @@ int32_t currentGpsLongitudeE7() {
   const int64_t scaled = static_cast<int64_t>(llround(lon * 10000000.0));
   return static_cast<int32_t>(clampValue<int64_t>(scaled, INT32_MIN, INT32_MAX));
 }
+
+// TODO: hut
+// GPS'ten saniye başı pulse geldiğinde çağrılan ISR
+void IRAM_ATTR onPpsPulse() {
+    // GPS'ten gelen saniye başı pulse'u — bu an UTC'nin tam saniye sınırı
+    // GPS epoch anchor hazırsa, o anchoru PPS anına kilitle
+    gPps.ppsMono  = esp_timer_get_time();
+    gPps.ppsEpoch = 0;     // ppsEpoch şu an kullanılmıyor — epoch hesabı updateGps() içinde yapılıyor
+    gPps.fresh    = true;
+}
+
 
 uint8_t crc8(const uint8_t* data, const size_t length) {
   uint8_t crc = 0;
@@ -1283,42 +1355,54 @@ void initGps() {
   } else {
     Serial.println("[INIT] GPS MOCK      disabled");
   }
+  if (PIN_GPS_PPS >= 0) {
+    pinMode(PIN_GPS_PPS, INPUT);
+    attachInterrupt(digitalPinToInterrupt(PIN_GPS_PPS),onPpsPulse, RISING);
+    Serial.printf("[INIT] GPS PPS       OK (pin:%d)\n", PIN_GPS_PPS);
+    } 
+  else {
+        Serial.println("[INIT] GPS PPS       disabled (set PIN_GPS_PPS to enable)");
+    }
 }
 
-bool processChunkForDetection(const int16_t* chunk, const size_t sampleCount, DetectionResult& out) {
-  out = DetectionResult{};
+// Returns true if a trigger was detected and fills out the details in 'out' -DetectionResult struct .
+// out fields: detected, peakAmplitude, snrDb, triggerRegion[], triggerLen, onsetEpochMicros
+bool processChunkForDetection(const int16_t* chunk,
+                               const size_t   sampleCount,
+                               const uint64_t chunkStartEpochMicros,
+                               DetectionResult& out) {
+    out = DetectionResult{};
 
-  for (size_t i = 0; i < sampleCount; ++i) {
-    const float sampleMag = fabsf(static_cast<float>(chunk[i]));
-    gSta = ALPHA_STA * sampleMag + (1.0f - ALPHA_STA) * gSta;
-    gLta = ALPHA_LTA * sampleMag + (1.0f - ALPHA_LTA) * gLta;
-    if (gLta < 1.0f) {
-      gLta = 1.0f;
-    }
+    for (size_t i = 0; i < sampleCount; ++i) {
+        const float sampleMag = fabsf(static_cast<float>(chunk[i]));
+        gSta = ALPHA_STA * sampleMag + (1.0f - ALPHA_STA) * gSta;
+        gLta = ALPHA_LTA * sampleMag + (1.0f - ALPHA_LTA) * gLta;
+        if (gLta < 1.0f) gLta = 1.0f;
 
-    ++gSamplesSinceTrigger;
-    const float ratio = gSta / gLta;
-    if (ratio <= STA_LTA_THRESHOLD || gSamplesSinceTrigger < COOLDOWN_SAMPLES) {
-      continue;
-    }
+        ++gSamplesSinceTrigger;
+        const float ratio = gSta / gLta;
+        if (ratio <= STA_LTA_THRESHOLD || gSamplesSinceTrigger < COOLDOWN_SAMPLES) {
+            continue;
+        }
 
-    gSamplesSinceTrigger = 0;
+        gSamplesSinceTrigger = 0;
 
-    size_t start = (i > 128) ? (i - 128) : 0;
-    size_t end = i + 896;
-    if (end > sampleCount) {
-      end = sampleCount;
-    }
-    if (end <= start) {
-      start = 0;
-      end = sampleCount;
-    }
+        // Tetikleme onset zamanı: chunk başından i sample sonrası
+        // Her sample = 1/SAMPLE_RATE saniye = 62.5 µs @ 16kHz
+        const uint64_t sampleOffsetMicros =
+            (static_cast<uint64_t>(i) * 1000000ULL) / SAMPLE_RATE;
 
-    out.triggerLen = end - start;
-    if (out.triggerLen == 0) {
-      return false;
-    }
-    memcpy(out.triggerRegion, chunk + start, out.triggerLen * sizeof(int16_t));
+        out.onsetSampleOffset  = i;
+        out.onsetEpochMicros   = chunkStartEpochMicros + sampleOffsetMicros;   // ← gerçek onset
+
+        size_t start = (i > 128) ? (i - 128) : 0;
+        size_t end   = i + 896;
+        if (end > sampleCount) end = sampleCount;
+        if (end <= start)      { start = 0; end = sampleCount; }
+
+        out.triggerLen = end - start;
+        if (out.triggerLen == 0) return false;
+        memcpy(out.triggerRegion, chunk + start, out.triggerLen * sizeof(int16_t));
 
     uint16_t peakAmp = 0;
     double sumSquares = 0.0;
@@ -1465,20 +1549,6 @@ AudioMetrics computeAudioMetrics(const int16_t* samples, const size_t length) {
   return metrics;
 }
 
-void printAudioMagnitude(const AudioMetrics& metrics) {
-  const uint32_t now = millis();
-  static uint32_t lastPrintMs = 0;
-  if ((now - lastPrintMs) < MAG_PRINT_PERIOD_MS) {
-    return;
-  }
-  lastPrintMs = now;
-
-  const float ratio = gSta / ((gLta > 1.0f) ? gLta : 1.0f);
-  // Serial.printf("MAG peak=%u rms=%.1f min=%d max=%d dc=%.1f sta=%.1f lta=%.1f ratio=%.2f\n",
-  //               static_cast<unsigned>(metrics.peak), metrics.rms, static_cast<int>(metrics.minSample),
-  //               static_cast<int>(metrics.maxSample), metrics.dc, gSta, gLta, ratio);
-}
-
 void printPerfTimings(const PerfTimings& perf) {
   static uint32_t lastPeriodicMs = 0;
   const uint32_t nowMs = millis();
@@ -1502,6 +1572,21 @@ void printPerfTimings(const PerfTimings& perf) {
       (perf.txAttempted && perf.txOk) ? 1U : 0U);
 }
 
+void printAudioMagnitude(const AudioMetrics& metrics) {
+  const uint32_t now = millis();
+  static uint32_t lastPrintMs = 0;
+  if ((now - lastPrintMs) < MAG_PRINT_PERIOD_MS) {
+    return;
+  }
+  lastPrintMs = now;
+
+  const float ratio = gSta / ((gLta > 1.0f) ? gLta : 1.0f);
+  // Serial.printf("MAG peak=%u rms=%.1f min=%d max=%d dc=%.1f sta=%.1f lta=%.1f ratio=%.2f\n",
+  //               static_cast<unsigned>(metrics.peak), metrics.rms, static_cast<int>(metrics.minSample),
+  //               static_cast<int>(metrics.maxSample), metrics.dc, gSta, gLta, ratio);
+}
+
+//
 void updateAudioFlow(const AudioMetrics& metrics) {
   ++gAudioFlow.chunksWindow;
 
@@ -1723,10 +1808,12 @@ void applyWhistleRescue(const DetectionResult& detection, const FFTResult& fftRe
   cls.action = PacketAction::Target;
 }
 
-NodePacket buildPacket(const DetectionResult& detection, const FFTResult& fftResult, const ClassResult& cls) {
+NodePacket buildPacket(const DetectionResult& detection,
+                       const FFTResult& fftResult,
+                       const ClassResult& cls) {
   NodePacket packet{};
-  packet.node_id = static_cast<uint8_t>(NODE_ID);
-  packet.ts_micros = currentGpsEpochMicros();
+  packet.node_id    = static_cast<uint8_t>(NODE_ID);
+  packet.ts_micros  = detection.onsetEpochMicros;
   packet.magnitude = detection.peakAmplitude;
   packet.peak_freq_hz = fftResult.peakFreqHz;
   packet.ml_class = cls.classId;
@@ -1822,6 +1909,9 @@ void nodeLoop() {
   updateGps();
   perf.gpsUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
 
+  // i2s_read'den ÖNCE chunk zamanını kaydet
+  const uint64_t chunkStartEpoch = currentGpsEpochMicros();
+
   size_t bytesRead = 0;
   stageStartUs = esp_timer_get_time();
   const esp_err_t readErr = i2s_read(I2S_PORT, gAudioRawChunk, sizeof(gAudioRawChunk), &bytesRead, portMAX_DELAY);
@@ -1851,7 +1941,8 @@ void nodeLoop() {
 
   DetectionResult detection{};
   stageStartUs = esp_timer_get_time();
-  if (!processChunkForDetection(gAudioChunk, samplesRead, detection)) {
+  // ← senin eklemen: chunkStartEpoch parametresi
+  if (!processChunkForDetection(gAudioChunk, samplesRead, chunkStartEpoch, detection)) {
     perf.detectUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
     perf.totalUs = static_cast<uint32_t>(esp_timer_get_time() - loopStartUs);
     printPerfTimings(perf);
@@ -1860,6 +1951,7 @@ void nodeLoop() {
   perf.detected = true;
   perf.detectUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
 
+  // geri kalan her şey takım arkadaşının kodu, değişmez
   stageStartUs = esp_timer_get_time();
   const FFTResult fftResult = analyzeFFT(detection.triggerRegion, detection.triggerLen);
   perf.fftUs = static_cast<uint32_t>(esp_timer_get_time() - stageStartUs);
@@ -1886,16 +1978,16 @@ void nodeLoop() {
     if (txOk) {
       printPacketDump(packet);
       gBatteryPct = fmaxf(0.0f, gBatteryPct - BATTERY_DRAIN_PER_EVENT);
-      Serial.printf("TX evt=%u class=%s conf=%u%% peak=%u f0=%uHz snr=%u\n", static_cast<unsigned>(packet.event_count),
-                    className(packet.ml_class), static_cast<unsigned>(packet.ml_confidence),
-                    static_cast<unsigned>(packet.magnitude), static_cast<unsigned>(packet.peak_freq_hz),
-                    static_cast<unsigned>(packet.snr_db));
+      Serial.printf("TX evt=%u class=%s conf=%u%% peak=%u f0=%uHz snr=%u\n",
+                    static_cast<unsigned>(packet.event_count), className(packet.ml_class),
+                    static_cast<unsigned>(packet.ml_confidence), static_cast<unsigned>(packet.magnitude),
+                    static_cast<unsigned>(packet.peak_freq_hz), static_cast<unsigned>(packet.snr_db));
     } else {
       Serial.println("LoRa TX failed (AUX timeout or UART short write)");
     }
   } else if (cls.action == PacketAction::LogOnly) {
-    Serial.printf("LOG class=%s conf=%u%% peak=%u\n", className(cls.classId), static_cast<unsigned>(cls.confidencePct),
-                  static_cast<unsigned>(detection.peakAmplitude));
+    Serial.printf("LOG class=%s conf=%u%% peak=%u\n", className(cls.classId),
+                  static_cast<unsigned>(cls.confidencePct), static_cast<unsigned>(detection.peakAmplitude));
   } else {
     Serial.printf("REJECT class=%s conf=%u%% peak=%u fft_pass=%d\n", className(cls.classId),
                   static_cast<unsigned>(cls.confidencePct), static_cast<unsigned>(detection.peakAmplitude),
